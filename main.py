@@ -7,50 +7,48 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
-# Browser path ko project folder ke andar fix karna (taaki Render delete na kar sake)
 BROWSER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pw-browsers")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_DIR
 
-app = FastAPI(title="Flipkart Auto OTP & Login Bot")
+app = FastAPI(title="Turbo Flipkart OTP & Login Bot")
 
 VALID_KEY = "Akshay12dev"
 playwright_instance = None
 browser_instance = None
 active_sessions = {}
 
+# Resource blocker: Images, Fonts aur Trackers ko block karega taaki speed 10x ho jaye
+async def block_heavy_resources(route):
+    req_type = route.request.resource_type
+    req_url = route.request.url.lower()
+    if req_type in ["image", "media", "font"] or any(x in req_url for x in ["analytics", "tracker", "doubleclick", "google-analytics"]):
+        await route.abort()
+    else:
+        await route.continue_()
+
 @app.on_event("startup")
 async def startup_event():
     global playwright_instance, browser_instance
-    print(">>> Starting Playwright Engine...")
+    print(">>> Starting Ultra-Fast Playwright Engine...")
     playwright_instance = await async_playwright().start()
 
-    # Browser launch karne ki koshish, agar missing ho toh auto-download karega
-    try:
-        browser_instance = await playwright_instance.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
-        )
-    except Exception as e:
-        print(f"Browser missing laga, auto-installing now: {e}")
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-        browser_instance = await playwright_instance.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
-        )
+    browser_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--blink-settings=imagesEnabled=false", # Direct browser-level image disable
+        "--disable-extensions"
+    ]
 
-    print(">>> Playwright Browser successfully ready & running!")
+    try:
+        browser_instance = await playwright_instance.chromium.launch(headless=True, args=browser_args)
+    except Exception:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
+        browser_instance = await playwright_instance.chromium.launch(headless=True, args=browser_args)
+
+    print(">>> Turbo Browser Ready!")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -61,30 +59,30 @@ async def shutdown_event():
         await playwright_instance.stop()
 
 async def cleanup_old_sessions():
-    current_time = time.time()
+    now = time.time()
     for num, data in list(active_sessions.items()):
-        if current_time - data["created_at"] > 180:
+        if now - data["created_at"] > 180: # 3 min expiry
             try:
                 await data["context"].close()
             except:
                 pass
             del active_sessions[num]
-            print(f"[CLEANUP] Expired session destroyed for: {num}")
 
 # ==========================================
-# 1. SEND OTP ENDPOINT: /sent
+# 1. TURBO SEND OTP: /sent (Target: ~2-3s)
 # ==========================================
 @app.get("/sent")
 async def send_otp(number: str = Query(...), key: str = Query(...)):
-    await cleanup_old_sessions()
+    asyncio.create_task(cleanup_old_sessions())
 
     if key != VALID_KEY:
-        return JSONResponse(status_code=403, content={"status": "error", "message": "Key Galat hai! Access Denied."})
+        return JSONResponse(status_code=403, content={"status": "error", "message": "Key Galat hai!"})
 
     number = number.strip().replace("+91", "").replace(" ", "")
     if len(number) != 10 or not number.isdigit():
-        return JSONResponse(status_code=400, content={"status": "error", "message": "Kripya 10 digit ka valid number dalein."})
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Valid 10 digit number dalein."})
 
+    # Purana session ho toh remove
     if number in active_sessions:
         try:
             await active_sessions[number]["context"].close()
@@ -101,73 +99,44 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
         )
         page = await context.new_page()
 
-        await page.goto("https://www.flipkart.com/account/login", wait_until="domcontentloaded", timeout=35000)
-        await asyncio.sleep(1.5)
+        # Heavy files route block karna
+        await page.route("**/*", block_heavy_resources)
 
-        input_selectors = ["input[type='tel']", "input[type='number']", "input[type='text']", "input[maxlength='10']"]
-        input_box = None
-        for sel in input_selectors:
-            loc = page.locator(sel).first
-            if await loc.is_visible():
-                input_box = loc
-                break
+        # Fast page load (domcontentloaded)
+        await page.goto("https://www.flipkart.com/account/login", wait_until="domcontentloaded", timeout=15000)
 
-        if not input_box:
-            await context.close()
-            return JSONResponse(status_code=500, content={"status": "failed", "message": "Phone input field nahi mila!"})
+        # Phone input box par direct instant fill (No delay)
+        phone_input = page.locator("input[type='tel'], input[maxlength='10'], input[type='text']").first
+        await phone_input.wait_for(state="visible", timeout=4000)
+        await phone_input.fill(number)
 
-        await input_box.click()
-        await input_box.fill("")
-        await input_box.type(number, delay=40)
+        # Continue button click
+        btn = page.locator("button:has-text('Continue'), button:has-text('Request OTP'), button[type='submit']").first
+        await btn.click()
 
-        btn_selectors = ["button:has-text('Continue')", "button:has-text('Request OTP')", "button[type='submit']"]
-        continue_btn = None
-        for b_sel in btn_selectors:
-            b_loc = page.locator(b_sel).first
-            if await b_loc.is_visible():
-                continue_btn = b_loc
-                break
+        # Event-based wait: Jaise hi OTP indicator screen par aayega turant response trigger hoga
+        otp_screen = page.locator("text=Please enter the verification code, text=verification code, text=Resend code, text=Trying to autocapture").first
+        await otp_screen.wait_for(state="visible", timeout=6000)
 
-        if not continue_btn:
-            await context.close()
-            return JSONResponse(status_code=500, content={"status": "failed", "message": "Continue button nahi mila!"})
+        active_sessions[number] = {
+            "context": context,
+            "page": page,
+            "created_at": time.time()
+        }
 
-        await continue_btn.click()
-
-        otp_sent = False
-        indicators = ["text=Please enter the verification code", "text=verification code", "text=Resend code", "text=Trying to autocapture"]
-        
-        for _ in range(15):
-            for ind in indicators:
-                if await page.locator(ind).first.is_visible():
-                    otp_sent = True
-                    break
-            if otp_sent:
-                break
-            await asyncio.sleep(1)
-
-        if otp_sent:
-            active_sessions[number] = {
-                "context": context,
-                "page": page,
-                "created_at": time.time()
-            }
-            return {
-                "status": "success",
-                "message": f"OTP successfully sent to +91-{number}",
-                "number": number
-            }
-        else:
-            await context.close()
-            return JSONResponse(status_code=400, content={"status": "failed", "message": "OTP nahi bheja ja saka."})
+        return {
+            "status": "success",
+            "message": f"OTP successfully sent to +91-{number}",
+            "number": number
+        }
 
     except Exception as e:
         if 'context' in locals():
             await context.close()
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+        return JSONResponse(status_code=500, content={"status": "failed", "message": f"OTP nahi bheja ja saka: {str(e)}"})
 
 # ==========================================
-# 2. VERIFY OTP ENDPOINT: /virifid
+# 2. TURBO VERIFY OTP: /virifid (Target: ~1-2s)
 # ==========================================
 @app.get("/virifid")
 async def verify_otp(number: str = Query(...), otp: str = Query(...)):
@@ -182,59 +151,53 @@ async def verify_otp(number: str = Query(...), otp: str = Query(...)):
     page = session_data["page"]
 
     try:
+        # OTP Boxes instant fill
         otp_boxes = page.locator("input[maxlength='1']")
         boxes_count = await otp_boxes.count()
 
         if boxes_count >= 6:
             for idx in range(min(6, len(otp))):
-                box = otp_boxes.nth(idx)
-                await box.click()
-                await box.fill(otp[idx])
+                await otp_boxes.nth(idx).fill(otp[idx])
         else:
             first_box = page.locator("input[type='tel'], input[type='number'], input[maxlength='6'], input").first
-            await first_box.click()
-            await page.keyboard.type(otp, delay=50)
+            await first_box.fill(otp)
 
-        await asyncio.sleep(1)
-
+        # "Verify" button instant click
         verify_btn = page.locator("button:has-text('Verify')").first
-        if await verify_btn.is_visible():
-            await verify_btn.click()
+        await verify_btn.click()
 
+        # Ultra-fast check: Check if URL changed or error showed up
         login_success = False
         error_msg = None
 
-        for _ in range(10):
-            current_url = page.url
-            if "login" not in current_url:
+        for _ in range(8):  # 8 x 300ms = Max 2.4 seconds
+            await asyncio.sleep(0.3)
+            
+            if "login" not in page.url:
                 login_success = True
                 break
 
-            if await page.locator("text=Incorrect OTP").first.is_visible() or await page.locator("text=Invalid OTP").first.is_visible():
-                error_msg = "Invalid OTP (Galat OTP dala hai)"
+            if await page.locator("text=Incorrect OTP, text=Invalid OTP").first.is_visible():
+                error_msg = "Invalid OTP (Galat OTP)"
                 break
-            if await page.locator("text=OTP expired").first.is_visible() or await page.locator("text=expired").first.is_visible():
-                error_msg = "OTP Expired (OTP expire ho gaya hai)"
+            if await page.locator("text=OTP expired, text=expired").first.is_visible():
+                error_msg = "OTP Expired"
                 break
-
-            await asyncio.sleep(1)
 
         if login_success:
-            result = {"status": "success", "message": f"Login successfully completed for +91-{number}!", "login": True}
+            return {"status": "success", "message": f"Login successful for +91-{number}!", "login": True}
         else:
-            result = {"status": "failed", "message": error_msg if error_msg else "Login failed or wrong OTP.", "login": False}
-
-        return result
+            return {"status": "failed", "message": error_msg if error_msg else "Login failed / Wrong OTP", "login": False}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
     finally:
-        # Full clear on finish
+        # Zero-delay cleanup: memory & cookies instant clear
         try:
             await context.close()
         except:
             pass
         if number in active_sessions:
             del active_sessions[number]
-        print(f"[CLEANUP COMPLETE] Data wiped clean for: {number}")
+        print(f"[TURBO CLEANUP] Tab closed & full data cleared for: {number}")
