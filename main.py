@@ -10,7 +10,7 @@ from playwright.async_api import async_playwright
 BROWSER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pw-browsers")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_DIR
 
-app = FastAPI(title="Flipkart Bot")
+app = FastAPI(title="Flipkart Mobile OTP Bot")
 
 VALID_KEY = "Akshay12dev"
 playwright_instance = None
@@ -27,8 +27,7 @@ async def startup_event():
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu"
+        "--disable-dev-shm-usage"
     ]
 
     try:
@@ -37,7 +36,7 @@ async def startup_event():
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
         browser_instance = await playwright_instance.chromium.launch(headless=True, args=browser_args)
 
-    print(">>> Browser Engine Live!")
+    print(">>> Playwright Browser Engine Ready!")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -52,91 +51,150 @@ async def shutdown_event():
 # ==========================================
 @app.get("/sent")
 async def send_otp(number: str = Query(...), key: str = Query(...)):
+    # 1. Key Check
     if key != VALID_KEY:
-        return JSONResponse(status_code=403, content={"status": "error", "message": "Key Galat hai!"})
+        return JSONResponse(status_code=403, content={"status": "error", "message": "Key Galat hai! Access Denied."})
 
-    number = number.strip().replace("+91", "").replace(" ", "")
-    if len(number) != 10 or not number.isdigit():
-        return JSONResponse(status_code=400, content={"status": "error", "message": "10 digit valid number dalein."})
+    phone_number = number.strip().replace("+91", "").replace(" ", "")
+    if len(phone_number) != 10 or not phone_number.isdigit():
+        return JSONResponse(status_code=400, content={"status": "error", "message": "10 digit ka valid number dalein."})
 
-    if number in active_sessions:
+    # Purana context agar ho toh band karein
+    if phone_number in active_sessions:
         try:
-            await active_sessions[number]["context"].close()
+            await active_sessions[phone_number]["context"].close()
         except:
             pass
-        del active_sessions[number]
+        del active_sessions[phone_number]
 
     try:
-        # Wahi Desktop context jo GitHub Actions me success hua tha
+        # Aapke script ka exact Real Mobile Context
         context = await browser_instance.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            user_agent="Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+            viewport={"width": 412, "height": 915},
+            is_mobile=True,
+            has_touch=True,
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9,hi;q=0.8"
+            }
         )
         page = await context.new_page()
 
-        print(f"[{number}] Opening Flipkart Login...")
-        await page.goto("https://www.flipkart.com/account/login", wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(2)
-
-        # Check page status (Debugging ke liye)
-        title = await page.title()
-        print(f"[{number}] Page Loaded! Title: {title}")
-
-        if "access denied" in title.lower() or "blocked" in title.lower():
-            await context.close()
-            return JSONResponse(status_code=403, content={"status": "failed", "message": "Flipkart ne Render IP ko temporarily block kiya hai."})
-
-        # Desktop Flipkart input selectors
-        phone_input = page.locator("input[class*='_2IX_2-'], input[type='text'], input[autocomplete='off']").first
-        await phone_input.wait_for(state="visible", timeout=15000)
+        target_url = "https://www.flipkart.com/account/login"
+        print(f"[{phone_number}] Opening: {target_url}...")
         
-        await phone_input.click()
-        await phone_input.fill("")
-        await phone_input.type(number, delay=50)
+        # 45 second timeout taaki Render hang na ho
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+        await page.wait_for_timeout(2000)
 
-        # Desktop Continue / Request OTP button
-        btn = page.locator("button:has-text('Request OTP'), button:has-text('Continue'), button[type='submit']").first
-        await btn.wait_for(state="visible", timeout=5000)
-        await btn.click()
+        # Aapke script ke exact selectors
+        input_selectors = [
+            "input[type='tel']",
+            "input[type='number']",
+            "input[type='text']",
+            "input[maxlength='10']"
+        ]
 
-        # OTP Sent Screen indicator
-        otp_screen = page.locator("text=Please enter the verification code, text=verification code, text=Resend code, text=Enter OTP").first
-        await otp_screen.wait_for(state="visible", timeout=12000)
+        input_box = None
+        for selector in input_selectors:
+            loc = page.locator(selector).first
+            if await loc.is_visible():
+                input_box = loc
+                break
 
-        active_sessions[number] = {
-            "context": context,
-            "page": page,
-            "created_at": time.time()
-        }
+        if not input_box:
+            await context.close()
+            return JSONResponse(status_code=500, content={"status": "failed", "message": "FAILED: Mobile number input field nahi mila!"})
 
-        return {
-            "status": "success",
-            "message": f"OTP successfully sent to +91-{number}",
-            "number": number
-        }
+        # Number enter karna (with exact delay=50)
+        await input_box.click()
+        await input_box.fill("")
+        await input_box.type(phone_number, delay=50)
+        print(f"Number successfully dala gaya: {phone_number}")
+        await page.wait_for_timeout(1000)
+
+        # Continue button selectors (Aapke script ke anusaar)
+        btn_selectors = [
+            "button:has-text('Continue')",
+            "button:has-text('Request OTP')",
+            "button[type='submit']",
+            "button:has-text('Proceed')"
+        ]
+
+        continue_btn = None
+        for b_selector in btn_selectors:
+            b_loc = page.locator(b_selector).first
+            if await b_loc.is_visible():
+                continue_btn = b_loc
+                break
+
+        if not continue_btn:
+            await context.close()
+            return JSONResponse(status_code=500, content={"status": "failed", "message": "FAILED: 'Continue' button nahi mila!"})
+
+        await continue_btn.click()
+        print("Continue button clicked. Waiting for OTP screen...")
+
+        # Success indicators (Aapke script ke exact words)
+        success_indicators = [
+            "text=Please enter the verification code",
+            "text=verification code",
+            "text=Resend code",
+            "text=Trying to autocapture",
+            "input[maxlength='1']"
+        ]
+
+        otp_sent = False
+        start_time = time.time()
+
+        # 15 seconds wait loop
+        while time.time() - start_time < 15:
+            for indicator in success_indicators:
+                if await page.locator(indicator).first.is_visible():
+                    otp_sent = True
+                    break
+            if otp_sent:
+                break
+            await page.wait_for_timeout(1000)
+
+        if otp_sent:
+            # Session store karna taaki /virifid me yehi open page use ho
+            active_sessions[phone_number] = {
+                "context": context,
+                "page": page,
+                "created_at": time.time()
+            }
+            return {
+                "status": "success",
+                "message": f"Verification code/OTP sent to +91-{phone_number}!",
+                "number": phone_number
+            }
+        else:
+            await context.close()
+            return JSONResponse(status_code=400, content={"status": "failed", "message": "FAILED: OTP screen load nahi hua (Blocked ya Captcha issue)."})
 
     except Exception as e:
         if 'context' in locals():
             await context.close()
-        return JSONResponse(status_code=500, content={"status": "failed", "message": f"OTP error: {str(e)}"})
+        return JSONResponse(status_code=500, content={"status": "failed", "message": f"Error aaya: {str(e)}"})
 
 # ==========================================
 # 2. VERIFY OTP ENDPOINT: /virifid
 # ==========================================
 @app.get("/virifid")
 async def verify_otp(number: str = Query(...), otp: str = Query(...)):
-    number = number.strip().replace("+91", "").replace(" ", "")
+    phone_number = number.strip().replace("+91", "").replace(" ", "")
     otp = otp.strip()
 
-    if number not in active_sessions:
-        return JSONResponse(status_code=404, content={"status": "failed", "message": "Session nahi mila ya expire ho gaya!"})
+    if phone_number not in active_sessions:
+        return JSONResponse(status_code=404, content={"status": "failed", "message": "Session expire ho gaya ya nahi mila! Pehle /sent call karein."})
 
-    session_data = active_sessions[number]
+    session_data = active_sessions[phone_number]
     context = session_data["context"]
     page = session_data["page"]
 
     try:
-        # OTP input handle karna
+        # OTP boxes me fill karna
         otp_boxes = page.locator("input[maxlength='1']")
         boxes_count = await otp_boxes.count()
 
@@ -145,44 +203,49 @@ async def verify_otp(number: str = Query(...), otp: str = Query(...)):
                 await otp_boxes.nth(idx).fill(otp[idx])
         else:
             first_box = page.locator("input[type='tel'], input[type='number'], input[maxlength='6'], input").first
-            await first_box.fill(otp)
+            await first_box.click()
+            await page.keyboard.type(otp, delay=50)
 
-        await asyncio.sleep(0.5)
+        await page.wait_for_timeout(1000)
 
-        verify_btn = page.locator("button:has-text('Verify'), button:has-text('Login')").first
+        # Verify button click
+        verify_btn = page.locator("button:has-text('Verify')").first
         if await verify_btn.is_visible():
             await verify_btn.click()
 
         login_success = False
         error_msg = None
 
-        for _ in range(10):
-            await asyncio.sleep(0.5)
+        # Check loop (6 seconds)
+        for _ in range(12):
+            await page.wait_for_timeout(500)
 
+            # Agar URL change ho gaya ya login se bahar nikal gaya
             if "login" not in page.url:
                 login_success = True
                 break
 
             if await page.locator("text=Incorrect OTP, text=Invalid OTP").first.is_visible():
-                error_msg = "Galat OTP"
+                error_msg = "Incorrect OTP (Galat OTP)"
                 break
             if await page.locator("text=OTP expired, text=expired").first.is_visible():
                 error_msg = "OTP Expired"
                 break
 
         if login_success:
-            return {"status": "success", "message": f"Login successful for {number}!", "login": True}
+            return {"status": "success", "message": f"Login successful for +91-{phone_number}!", "login": True}
         else:
-            return {"status": "failed", "message": error_msg if error_msg else "Login failed / Wrong OTP", "login": False}
+            return {"status": "failed", "message": error_msg if error_msg else "Login failed or wrong OTP.", "login": False}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
     finally:
-        # Full clear on finish
+        # User ka data, tab aur cache instant clear
         try:
             await context.close()
         except:
             pass
-        if number in active_sessions:
-            del active_sessions[number]
+        if phone_number in active_sessions:
+            del active_sessions[phone_number]
+        print(f"[CLEANUP] Full tab wiped and closed for: {phone_number}")
