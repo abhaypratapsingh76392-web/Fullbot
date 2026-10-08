@@ -1,34 +1,56 @@
-import asyncio
+import os
+import sys
 import time
+import asyncio
+import subprocess
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
+# Browser path ko project folder ke andar fix karna (taaki Render delete na kar sake)
+BROWSER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pw-browsers")
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_DIR
+
 app = FastAPI(title="Flipkart Auto OTP & Login Bot")
 
-# Secret Security Key
 VALID_KEY = "Akshay12dev"
-
-# Browser aur Active sessions store karne ke liye
 playwright_instance = None
 browser_instance = None
-active_sessions = {}  # { "number": {"context": ctx, "page": page, "created_at": timestamp} }
+active_sessions = {}
 
 @app.on_event("startup")
 async def startup_event():
     global playwright_instance, browser_instance
+    print(">>> Starting Playwright Engine...")
     playwright_instance = await async_playwright().start()
-    browser_instance = await playwright_instance.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu"
-        ]
-    )
-    print(">>> Playwright Browser Engine Started successfully!")
+
+    # Browser launch karne ki koshish, agar missing ho toh auto-download karega
+    try:
+        browser_instance = await playwright_instance.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ]
+        )
+    except Exception as e:
+        print(f"Browser missing laga, auto-installing now: {e}")
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
+        browser_instance = await playwright_instance.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ]
+        )
+
+    print(">>> Playwright Browser successfully ready & running!")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -38,11 +60,10 @@ async def shutdown_event():
     if playwright_instance:
         await playwright_instance.stop()
 
-# Auto session cleanup (agar koi 3 minute tak OTP na dale toh memory clear kare)
 async def cleanup_old_sessions():
     current_time = time.time()
     for num, data in list(active_sessions.items()):
-        if current_time - data["created_at"] > 180:  # 3 minutes expiry
+        if current_time - data["created_at"] > 180:
             try:
                 await data["context"].close()
             except:
@@ -57,7 +78,6 @@ async def cleanup_old_sessions():
 async def send_otp(number: str = Query(...), key: str = Query(...)):
     await cleanup_old_sessions()
 
-    # 1. Key Verification
     if key != VALID_KEY:
         return JSONResponse(status_code=403, content={"status": "error", "message": "Key Galat hai! Access Denied."})
 
@@ -65,7 +85,6 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
     if len(number) != 10 or not number.isdigit():
         return JSONResponse(status_code=400, content={"status": "error", "message": "Kripya 10 digit ka valid number dalein."})
 
-    # Purana session ho toh pehle clean karo
     if number in active_sessions:
         try:
             await active_sessions[number]["context"].close()
@@ -74,7 +93,6 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
         del active_sessions[number]
 
     try:
-        # Har request ke liye bilkul fresh & isolated context (Pura data clear state)
         context = await browser_instance.new_context(
             user_agent="Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
             viewport={"width": 412, "height": 915},
@@ -83,11 +101,9 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
         )
         page = await context.new_page()
 
-        # Flipkart Login Open karna
         await page.goto("https://www.flipkart.com/account/login", wait_until="domcontentloaded", timeout=35000)
         await asyncio.sleep(1.5)
 
-        # Phone Number Input Box dhoondna
         input_selectors = ["input[type='tel']", "input[type='number']", "input[type='text']", "input[maxlength='10']"]
         input_box = None
         for sel in input_selectors:
@@ -104,7 +120,6 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
         await input_box.fill("")
         await input_box.type(number, delay=40)
 
-        # Continue Button click karna
         btn_selectors = ["button:has-text('Continue')", "button:has-text('Request OTP')", "button[type='submit']"]
         continue_btn = None
         for b_sel in btn_selectors:
@@ -119,11 +134,10 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
 
         await continue_btn.click()
 
-        # OTP Screen Check karna
         otp_sent = False
         indicators = ["text=Please enter the verification code", "text=verification code", "text=Resend code", "text=Trying to autocapture"]
         
-        for _ in range(15):  # 15 seconds wait
+        for _ in range(15):
             for ind in indicators:
                 if await page.locator(ind).first.is_visible():
                     otp_sent = True
@@ -133,7 +147,6 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
             await asyncio.sleep(1)
 
         if otp_sent:
-            # Session ko save rakhein taaki /virifid par yehi page use ho sake
             active_sessions[number] = {
                 "context": context,
                 "page": page,
@@ -146,7 +159,7 @@ async def send_otp(number: str = Query(...), key: str = Query(...)):
             }
         else:
             await context.close()
-            return JSONResponse(status_code=400, content={"status": "failed", "message": "OTP nahi bheja ja saka (Limit block ya Captcha issue)."})
+            return JSONResponse(status_code=400, content={"status": "failed", "message": "OTP nahi bheja ja saka."})
 
     except Exception as e:
         if 'context' in locals():
@@ -169,41 +182,34 @@ async def verify_otp(number: str = Query(...), otp: str = Query(...)):
     page = session_data["page"]
 
     try:
-        # OTP Boxes fill karna
         otp_boxes = page.locator("input[maxlength='1']")
         boxes_count = await otp_boxes.count()
 
         if boxes_count >= 6:
-            # 6 alag alag dibbe hain
             for idx in range(min(6, len(otp))):
                 box = otp_boxes.nth(idx)
                 await box.click()
                 await box.fill(otp[idx])
         else:
-            # Single input box ya keyboard type
             first_box = page.locator("input[type='tel'], input[type='number'], input[maxlength='6'], input").first
             await first_box.click()
             await page.keyboard.type(otp, delay=50)
 
         await asyncio.sleep(1)
 
-        # "Verify" button click karna
         verify_btn = page.locator("button:has-text('Verify')").first
         if await verify_btn.is_visible():
             await verify_btn.click()
 
-        # Check response: Login hua ya Expire/Invalid hai
         login_success = False
         error_msg = None
 
-        for _ in range(10):  # 10 second wait
-            # Agar login ho gaya toh login screen gayab ho jayegi ya URL badal jayega
+        for _ in range(10):
             current_url = page.url
             if "login" not in current_url:
                 login_success = True
                 break
 
-            # Error messages check
             if await page.locator("text=Incorrect OTP").first.is_visible() or await page.locator("text=Invalid OTP").first.is_visible():
                 error_msg = "Invalid OTP (Galat OTP dala hai)"
                 break
@@ -213,19 +219,10 @@ async def verify_otp(number: str = Query(...), otp: str = Query(...)):
 
             await asyncio.sleep(1)
 
-        # Response tayyar karna
         if login_success:
-            result = {
-                "status": "success",
-                "message": f"Login successfully completed for +91-{number}!",
-                "login": True
-            }
+            result = {"status": "success", "message": f"Login successfully completed for +91-{number}!", "login": True}
         else:
-            result = {
-                "status": "failed",
-                "message": error_msg if error_msg else "Login failed or wrong OTP.",
-                "login": False
-            }
+            result = {"status": "failed", "message": error_msg if error_msg else "Login failed or wrong OTP.", "login": False}
 
         return result
 
@@ -233,11 +230,11 @@ async def verify_otp(number: str = Query(...), otp: str = Query(...)):
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
     finally:
-        # Pura data turant wipe out aur clear karna (Aapki requirement ke anusar)
+        # Full clear on finish
         try:
             await context.close()
         except:
             pass
         if number in active_sessions:
             del active_sessions[number]
-        print(f"[CLEANUP COMPLETE] Session, cookies aur storage cleared for: {number}")
+        print(f"[CLEANUP COMPLETE] Data wiped clean for: {number}")
