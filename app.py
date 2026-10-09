@@ -15,23 +15,24 @@ PAGE = """
     body{font-family:system-ui,sans-serif;background:#101827;color:#f3f4f6;margin:0;padding:24px}
     main{max-width:650px;margin:8vh auto;background:#1d293b;border:1px solid #344256;border-radius:18px;padding:24px}
     h1{margin-top:0} p{line-height:1.6;color:#cbd5e1}
-    button{background:#38bdf8;color:#082f49;border:0;border-radius:10px;padding:12px 18px;font-weight:700;font-size:16px}
+    button{background:#38bdf8;color:#082f49;border:0;border-radius:10px;padding:12px 18px;font-weight:700;font-size:16px;margin-right:8px;margin-top:8px}
     #result{margin-top:18px;padding:14px;background:#0f172a;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere}
   </style>
 </head>
 <body><main>
-  <h1>Fullbot</h1>
-  <p>Render deployment status and safe public-page connectivity check.</p>
-  <p>This version does not submit phone numbers, request OTPs, or automate account login.</p>
-  <button onclick="checkSite()">Check public site connection</button>
+  <h1>Fullbot — Safe Status</h1>
+  <p>Ye app sirf public pages ki reachability check karta hai. Koi login/OTP automation nahi.</p>
+  <button onclick="hit('/check')">Check Flipkart homepage</button>
+  <button onclick="hit('/check-login')">Check Flipkart login page</button>
+  <button onclick="hit('/health')">Health</button>
   <div id="result">Ready.</div>
 </main>
 <script>
-async function checkSite(){
+async function hit(path){
   const out=document.getElementById('result');
-  out.textContent='Checking…';
+  out.textContent='Checking '+path+' …';
   try{
-    const r=await fetch('/check');
+    const r=await fetch(path);
     const data=await r.json();
     out.textContent=JSON.stringify(data,null,2);
   }catch(e){out.textContent='Request failed: '+e.message;}
@@ -39,35 +40,46 @@ async function checkSite(){
 </script></body></html>
 """
 
+def probe(url):
+    try:
+        r = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "Fullbot-Connectivity-Check/1.0"},
+            allow_redirects=True,
+        )
+        return {
+            "ok": r.status_code == 200,
+            "target": url,
+            "final_url": r.url,
+            "http_status": r.status_code,
+            "latency_ms": int(r.elapsed.total_seconds() * 1000),
+        }
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "target": url,
+            "error": type(exc).__name__,
+            "message": str(exc),
+        }
+
 @app.get("/")
 def index():
     return render_template_string(PAGE)
 
 @app.get("/health")
 def health():
-    return jsonify(status="ok", service="Fullbot", mode="safe-connectivity-check")
+    return jsonify(status="ok", service="Fullbot", mode="connectivity-only")
 
 @app.get("/check")
-def check_public_site():
-    try:
-        response = requests.get(
-            "https://www.flipkart.com/",
-            timeout=15,
-            headers={"User-Agent": "Fullbot-Connectivity-Check/1.0"}
-        )
-        return jsonify(
-            ok=response.status_code < 500,
-            target="https://www.flipkart.com/",
-            http_status=response.status_code,
-            message="Public homepage connectivity checked; this does not test login or OTP delivery."
-        ), 200
-    except requests.RequestException as exc:
-        return jsonify(
-            ok=False,
-            target="https://www.flipkart.com/",
-            error=type(exc).__name__,
-            message=str(exc)
-        ), 502
+def check_home():
+    return jsonify(probe("https://www.flipkart.com/")), 200
+
+@app.get("/check-login")
+def check_login():
+    data = probe("https://www.flipkart.com/account/login")
+    data["note"] = "Sirf page reachable hai ya nahi check. Koi number submit nahi hota."
+    return jsonify(data), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
